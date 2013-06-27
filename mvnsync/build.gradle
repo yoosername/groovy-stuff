@@ -1,0 +1,84 @@
+apply plugin: 'groovy'
+apply plugin: 'eclipse'
+
+project.ext.mainClassName="mvnsync"
+
+configurations{
+	assembly
+	assemblyBoot
+}
+
+repositories {
+    // Where to get the dependencies from
+    mavenCentral()
+}
+
+dependencies {
+    // All dependencies are groovy compile / runtime dependencies
+    groovy 'org.codehaus.groovy:groovy-all:2.0.0'
+	groovy 'org.apache.ivy:ivy:2.2.0'
+	
+	compile 'org.codehaus.groovy:groovy-all:2.0.0'
+	compile 'org.apache.ivy:ivy:2.2.0' 
+	compile 'org.apache.lucene:lucene-core:4.0.0'
+    compile 'org.apache.lucene:lucene-queryparser:4.0.0'
+    compile 'org.apache.lucene:lucene-analyzers-common:4.0.0'
+    compile 'org.apache.lucene:lucene-queries:4.0.0'
+    compile 'org.apache.maven.indexer:indexer-artifact:5.1.1'
+    compile 'org.apache.maven.indexer:indexer-core:5.1.1'
+    compile 'org.apache.maven.indexer:maven-indexer:5.1.1'
+    compile 'org.apache.maven.indexer:indexer-cli:5.1.1'
+    compile 'org.apache.maven.wagon:wagon-provider-api:2.4'
+    compile 'org.apache.maven.wagon:wagon-http:2.4'
+    compile 'org.codehaus.plexus:plexus:3.3.1'
+    compile 'org.codehaus.plexus:plexus-utils:3.0.10'
+    compile 'org.codehaus.plexus:plexus-classworlds:2.4.2'
+    compile 'org.codehaus.plexus:plexus-container-default:1.5.5'
+    compile 'org.sonatype.aether:aether-api:1.13.1'
+    compile 'commons-logging:commons-logging:1.1.3'
+	
+	assembly 'classworlds:classworlds:1.1'
+	assemblyBoot 'classworlds:classworlds-boot:1.0'
+}
+
+task createAssemblyStructure(type: Directory, dependsOn: [clean,jar]){
+	dir = file('assembly')
+	dir = file('assembly/WORLDS-INF')
+	dir = file('assembly/WORLDS-INF/lib')
+	dir = file('assembly/WORLDS-INF/conf')
+}
+
+task copyJarsToAssembly(type: Copy, dependsOn: createAssemblyStructure){
+	from configurations.runtime
+	from "$buildDir/libs"
+	into "assembly/WORLDS-INF/lib"
+}
+
+task copyConfigToAssembly(type: Copy, dependsOn: copyJarsToAssembly){
+	from "classworlds.conf"
+	into "assembly/WORLDS-INF/conf"
+}
+
+task copyClassworldsToAssembly(type: Copy, dependsOn: copyConfigToAssembly){
+	from configurations.assembly.singleFile
+	into "assembly/WORLDS-INF"
+	rename '(.+)-(.*)(.jar)', '$1$3'
+}
+
+task unpackClassworldsBoot(type: Copy, dependsOn: copyClassworldsToAssembly){
+	from ( zipTree(configurations.assemblyBoot.singleFile) ){
+		exclude 'META-INF/*'
+	}
+	into "assembly"
+}
+
+task createAssembly(type: Jar, dependsOn: unpackClassworldsBoot){
+	from "assembly"
+	archiveName "mvnsync-fat.jar"
+	
+	manifest {
+		attributes 'Main-Class': "org.codehaus.classworlds.uberjar.boot.Bootstrapper"
+	}
+}
+
+clean.doLast { ant.delete(dir: "assembly") }
