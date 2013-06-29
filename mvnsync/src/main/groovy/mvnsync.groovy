@@ -1,23 +1,6 @@
 //--------------------------------------------------------------------------
-// Imports / Dependencies
+// Imports
 //--------------------------------------------------------------------------
-//Removes comment block if running as groovy script
-//@Grab(group='org.apache.lucene', module='lucene-core', version='4.0.0')
-//@Grab(group='org.apache.lucene', module='lucene-queryparser', version='4.0.0')
-//@Grab(group='org.apache.lucene', module='lucene-analyzers-common', version='4.0.0')
-//@Grab(group='org.apache.lucene', module='lucene-queries', version='4.0.0')
-//@Grab(group='org.apache.maven.indexer', module='indexer-artifact', version='5.1.1')
-//@Grab(group='org.apache.maven.indexer', module='indexer-core', version='5.1.1')
-//@Grab(group='org.apache.maven.indexer', module='maven-indexer', version='5.1.1')
-//@Grab(group='org.apache.maven.indexer', module='indexer-cli', version='5.1.1')
-//@Grab(group='org.apache.maven.wagon', module='wagon-provider-api', version='2.4')
-//@Grab(group='org.apache.maven.wagon', module='wagon-http', version='2.4')
-//@Grab(group='org.codehaus.plexus', module='plexus', version='3.3.1')
-//@Grab(group='org.codehaus.plexus', module='plexus-utils', version='3.0.10')
-//@Grab(group='org.codehaus.plexus', module='plexus-classworlds', version='2.4.2')
-//@Grab(group='org.codehaus.plexus', module='plexus-container-default', version='1.5.5')
-//@Grab(group='org.sonatype.aether', module='aether-api', version='1.13.1')
-//@Grab(group='commons-logging', module='commons-logging', version='1.1.3')
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.search.BooleanClause.Occur;
@@ -66,7 +49,7 @@ import org.sonatype.aether.version.Version;
 // Default Settings
 //--------------------------------------------------------------------------
 remoteIndex = "http://mirrors.ibiblio.org/maven2/"
-remoteRepository = "http://mirrors.ibiblio.org/maven2/"
+remoteRepository = "http://repo.maven.apache.org/maven2"
 localIndex = "./index"	 			// Store local index in current directory
 localRepository = "./repository"	// Check here when synchronising
 maxDownload = -1     // -1 will download all required dependencies
@@ -80,6 +63,7 @@ delay = 0            // Delay in milliseconds between each batch
 def cli = new CliBuilder(usage:'mvnsync [options]', header:'options:')
 
 cli.h( longOpt: 'help', required: false, 'show usage information' )
+cli.c( longOpt: 'classpath', required: false, 'print runtime classpath and exit' )
 cli.m( longOpt: 'max', argName: 'int', required: false,args: 1, 'maximum downloads to perform' )
 cli.b( longOpt: 'batch', argName: 'int', required: false, args: 1, 'download in specified batches' )
 cli.d( longOpt: 'delay', argName: 'milliseconds', required: false, args: 1, 'millisecond delay between batches' )
@@ -102,8 +86,21 @@ if( args == null || args.length == 0 ) {
 def opt = cli.parse(args)
 
 // If help requested then just give usage and exit
+if(!opt){
+	// If opt builder errored for any reason then exit here
+	System.exit(-1)
+}
+
+// If help requested then just give usage and exit
 if(opt.h){
 	cli.usage()
+	System.exit(0)
+}
+
+// Print classpath if specified
+if(opt.c){
+	println "\nRuntime Classpath:\n\n"
+	printClassPath this.class.classLoader
 	System.exit(0)
 }
 
@@ -121,6 +118,48 @@ if (!(opt.s || opt.u)){
 	System.exit(-1)
 }
 
+//--------------------------------------------------------------------------
+// Validate user supplied options
+//--------------------------------------------------------------------------
+if(opt.i){
+	if(!validUrl(opt.i)){
+		println "\n[error] -i " + opt.i + " is not a valid URL\n"
+		cli.usage()
+		System.exit(-1)
+	}
+}
+
+if(opt.r){
+	if(!validUrl(opt.r)){
+		println "\n[error] -r " + opt.r + " is not a valid URL\n"
+		cli.usage()
+		System.exit(-1)
+	}
+}
+
+if(opt.m){
+	if(!opt.m.isNumber()){
+		println "\n[error] -m " + opt.m + " is not a valid number\n"
+		cli.usage()
+		System.exit(-1)
+	}
+}
+
+if(opt.d){
+	if(!opt.d.isNumber()){
+		println "\n[error] -d " + opt.d + " is not a valid number\n"
+		cli.usage()
+		System.exit(-1)
+	}
+}
+
+if(opt.b){
+	if(!opt.b.isNumber()){
+		println "\n[error] -b " + opt.b + " is not a valid number\n"
+		cli.usage()
+		System.exit(-1)
+	}
+}
 //--------------------------------------------------------------------------
 // Initialise variables - don't modify these
 //--------------------------------------------------------------------------
@@ -194,7 +233,6 @@ if (opt.u){
 	println( "==============================================================" )
  
 	// Create ResourceFetcher implementation to be used with IndexUpdateRequest
-	// Here, we use Wagon based one as shorthand, but all we need is a ResourceFetcher implementation
 	TransferListener listener = new AbstractTransferListener(){
 		public void transferStarted( TransferEvent transferEvent ){
 		   print( "  Downloading " + transferEvent.getResource().getName() );
@@ -210,7 +248,13 @@ if (opt.u){
 
 	Date mavenContextCurrentTimestamp = mavenContext.getTimestamp();
 	IndexUpdateRequest updateRequest = new IndexUpdateRequest( mavenContext, resourceFetcher );
-	IndexUpdateResult updateResult = indexUpdater.fetchAndUpdateIndex( updateRequest );
+	IndexUpdateResult updateResult
+	try{
+		updateResult = indexUpdater.fetchAndUpdateIndex( updateRequest );
+	}catch(e){
+		println "\n[error] could not fetch index. Check URL\n"
+		System.exit(-1)
+	}
 	if ( updateResult.isFullUpdate() )
 	{
 		println( "Full update happened!" );
@@ -272,53 +316,77 @@ if (opt.s){
 							+ classifier
 							+ "." + ai.fextension)
 						
-						if( !localFileCheck.exists() ){
-							// If here, then we found an artifact but it hasnt been downloaded yet, or was deleted
-							// or we chose the wrong or unused local repository
-							print "Downloading: [" + localFileCheck.getPath() +"] "
-		
-							// fetch individual artifact version via standard nexus setup
-							ant.exec( executable:cmdExec){
-								// Platform dependent
-								if(cmdExec.contains('cmd')){
-									arg(value: "/c")
-									arg(value:"mvn")
-								}							
-								
-								arg(value:"--quiet")
-								arg(value:"org.apache.maven.plugins:maven-dependency-plugin:2.7:get")
-								arg(value:"remoteRepositories=" + remoteRepository)
-								
-								artifact = ai.groupId+":"+ai.artifactId+":"+ai.version
-								
-								if(ai.packaging != null){
-									artifact = artifact + ":" + ai.packaging
+						if( !localFileCheck.exists()){
+							
+							// See if it has a pom and if it doesn whether the artifact has been relocated
+							relocated = false
+							pomCheck = new File("$localRepository/"
+								+ ai.groupId.replace(".","/") + "/" + ai.artifactId + "/" + ai.version
+								+ "/" + ai.artifactId + "-" + ai.version
+								+ classifier
+								+ ".pom")
+							
+							if(pomCheck.exists()){
+								pomCheckXML = new XmlSlurper().parseText(pomCheck.getText())
+								pomCheckXML.depthFirst().any {
+									if(it.name()=="relocation"){
+										relocated = true
+										println "Skipping: [" + ai.groupId + ":" + ai.artifactId + ":" + ai.version	+ "], relocated to: " + it.children()[0]
+									}
+								}
+							}
+							if(relocated == false){
+								// If here, then we found an artifact but it hasn't been downloaded yet, or was deleted
+								// and it isn't listed as relocated
+								print "Downloading: [" + localFileCheck.getPath() +"] "
+			
+								// fetch individual artifact version via standard nexus setup
+								ant.exec( executable:cmdExec){
+									// Platform dependent
+									if(cmdExec.contains('cmd')){
+										arg(value: "/c")
+										arg(value:"mvn")
+									}							
+									
+									arg(value:"--quiet")
+									//arg(value:"--batch-mode")
+									arg(value:"org.apache.maven.plugins:maven-dependency-plugin:2.7:get")
+									arg(value:"-DremoteRepositories=" + remoteRepository)
+									
+									artifact = ai.groupId+":"+ai.artifactId+":"+ai.version
+									
+									if(ai.packaging != null){
+										artifact = artifact + ":" + ai.packaging
+									}
+									
+									if(ai.classifier != null){
+										artifact = artifact + ":" + ai.classifier
+									}
+									
+									arg(value:"-Dartifact="+artifact)
 								}
 								
-								if(ai.classifier != null){
-									artifact = artifact + ":" + ai.classifier
+								if( localFileCheck.exists() ){
+									println "- success"
+								}else{
+									println "- failed"
 								}
 								
-								arg(value:"-Dartifact="+artifact)
-							}
-							
-							println "- done"
-							
-							// Return if we have reached our chosen max
-							if( maxDownload != 0 && ++downloaded >= maxDownload ){
-								println "MaxDownload limit reached"
-								return
-							}
-							
-							// If we've hit a batch limit then sleep for chosen amount
-							if(  ++batchCurrent > 0 && batchCurrent == batch ){
-								if( delay > 0 ){
-									println "sleeping for $delay milliseconds"
-									sleep delay
+								// Return if we have reached our chosen max
+								if( maxDownload != 0 && ++downloaded >= maxDownload ){
+									println "MaxDownload limit reached"
+									return
 								}
-								batchCurrent = 0
+								
+								// If we've hit a batch limit then sleep for chosen amount
+								if(  ++batchCurrent > 0 && batchCurrent == batch ){
+									if( delay > 0 ){
+										println "sleeping for $delay milliseconds"
+										sleep delay
+									}
+									batchCurrent = 0
+								}
 							}
-							
 						}
 					}
 				}
@@ -329,5 +397,25 @@ if (opt.s){
 		mavenContext.releaseIndexSearcher( searcher );
 		println( "==============================================================" )
 		println( "Finished" )
+	}
+}
+
+
+def printClassPath(classLoader) {
+	println "$classLoader"
+	classLoader.getURLs().each {url->
+	   println "- ${url.toString()}"
+	}
+	if (classLoader.parent) {
+	   printClassPath(classLoader.parent)
+	}
+}
+
+def validUrl(url){
+	try {
+		new URL(url.toString())
+		return true
+	} catch (MalformedURLException e) {
+		return false
 	}
 }
