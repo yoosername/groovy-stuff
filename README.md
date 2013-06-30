@@ -1,4 +1,4 @@
 groovy-stuff
 ============
 
-Various Groovy snippets
+Maven test synchronisation script written in groovy

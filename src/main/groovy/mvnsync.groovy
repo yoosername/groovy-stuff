@@ -309,36 +309,33 @@ if (opt.s){
 						// If classifier load the string ready
 						classifier = (ai.classifier != null) ? "-" + ai.classifier : ""
 						
-						// See if file exists locally
+						// Get the artifact location on disk
 						localFileCheck = new File("$localRepository/"
 							+ ai.groupId.replace(".","/") + "/" + ai.artifactId + "/" + ai.version
 							+ "/" + ai.artifactId + "-" + ai.version
 							+ classifier
 							+ "." + ai.fextension)
 						
+						// Get the related pom file
+						pomCheck = new File("$localRepository/"
+							+ ai.groupId.replace(".","/") + "/" + ai.artifactId + "/" + ai.version
+							+ "/" + ai.artifactId + "-" + ai.version
+							+ classifier
+							+ ".pom")
+						
+						// Continue if the artifact doesn't exist yet
 						if( !localFileCheck.exists()){
 							
-							// See if it has a pom and if it doesn whether the artifact has been relocated
-							relocated = false
-							pomCheck = new File("$localRepository/"
-								+ ai.groupId.replace(".","/") + "/" + ai.artifactId + "/" + ai.version
-								+ "/" + ai.artifactId + "-" + ai.version
-								+ classifier
-								+ ".pom")
+							// See if there is associated pom and whether the artifact has been relocated
+							relocated = assertRelocated(pomCheck)
 							
-							if(pomCheck.exists()){
-								pomCheckXML = new XmlSlurper().parseText(pomCheck.getText())
-								pomCheckXML.depthFirst().any {
-									if(it.name()=="relocation"){
-										relocated = true
-										println "Skipping: [" + ai.groupId + ":" + ai.artifactId + ":" + ai.version	+ "], relocated to: " + it.children()[0]
-									}
-								}
-							}
-							if(relocated == false){
-								// If here, then we found an artifact but it hasn't been downloaded yet, or was deleted
-								// and it isn't listed as relocated
-								print "Downloading: [" + localFileCheck.getPath() +"] "
+							if(relocated){
+								// Artifact has bee relocated. Skip it
+								printRelocationMsg(ai,pomCheck)
+							}else{
+								// Artifact doesn't exist and not relocated. Try downloading it
+								//print "Downloading: [" + localFileCheck.getPath() +"] "
+								print "Downloading: [" +ai.groupId + ":" + ai.artifactId + ":" + ai.version + classifier + "]"
 			
 								// fetch individual artifact version via standard nexus setup
 								ant.exec( executable:cmdExec){
@@ -366,10 +363,18 @@ if (opt.s){
 									arg(value:"-Dartifact="+artifact)
 								}
 								
+								// Test for the file again. should be here now. If not
+								// the pom may have been downloaded and so check relocation again
 								if( localFileCheck.exists() ){
-									println "- success"
+									println " - success"
 								}else{
-									println "- failed"
+									relocated = assertRelocated(pomCheck)
+									if(relocated != false){
+										println " - relocated"
+										printRelocationMsg(ai,pomCheck)
+									}else{
+										println " - failed"
+									}
 								}
 								
 								// Return if we have reached our chosen max
@@ -400,7 +405,7 @@ if (opt.s){
 	}
 }
 
-
+// Print out current classpath for debug purposes
 def printClassPath(classLoader) {
 	println "$classLoader"
 	classLoader.getURLs().each {url->
@@ -411,6 +416,7 @@ def printClassPath(classLoader) {
 	}
 }
 
+// Test for a valid url string
 def validUrl(url){
 	try {
 		new URL(url.toString())
@@ -418,4 +424,37 @@ def validUrl(url){
 	} catch (MalformedURLException e) {
 		return false
 	}
+}
+
+// Check a pomfile for relocation
+def assertRelocated(pom){
+	relocated = false
+	try{
+		xml = new XmlSlurper().parseText(pom.getText())
+		xml.depthFirst().any {
+			if(it.name()=="relocation"){
+				relocated = true
+			}
+		}
+	}catch(e){}
+	return relocated
+}
+
+// Return relocation destination
+def relocatedTo(pom){
+	destination = ""
+	try{
+		xml = new XmlSlurper().parseText(pom.getText())
+		xml.depthFirst().any {
+			if(it.name()=="relocation"){
+				destination = it.children()[0]
+			}
+		}
+	}catch(e){}
+	return destination
+}
+
+// print relocated to  msg
+def printRelocationMsg(ai, pom){
+	println "Relocated: [" +ai.groupId + ":" + ai.artifactId + ":" + ai.version + "] to " + "[" + relocatedTo(pom) + "] - skipping"
 }
