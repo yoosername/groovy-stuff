@@ -43,18 +43,16 @@ import org.codehaus.plexus.util.StringUtils;
 import org.sonatype.aether.util.version.GenericVersionScheme;
 import org.sonatype.aether.version.InvalidVersionSpecificationException;
 import org.sonatype.aether.version.Version;
+import org.codehaus.plexus.util.FileUtils;
 //--------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------
 // Default Settings
 //--------------------------------------------------------------------------
-remoteIndex = "http://mirrors.ibiblio.org/maven2/"
-remoteRepository = "http://repo.maven.apache.org/maven2"
-localIndex = "./index"	 			// Store local index in current directory
-localRepository = "./repository"	// Check here when synchronising
+remoteRepositoryUrl = "http://repo.maven.apache.org/maven2"
+localIndexPath = "./index"	 			// Store local index in current directory
+localRepositoryPath = "./repository"	// Check here when synchronising
 maxDownload = -1     // -1 will download all required dependencies
-batch = 10           // Number of downloads to batch together
-delay = 0            // Delay in milliseconds between each batch
 
 //--------------------------------------------------------------------------
 // Define and parse the program arguments
@@ -63,19 +61,14 @@ delay = 0            // Delay in milliseconds between each batch
 def cli = new CliBuilder(usage:'mvnsync [options]', header:'options:')
 
 cli.h( longOpt: 'help', required: false, 'show usage information' )
-cli.c( longOpt: 'classpath', required: false, 'print runtime classpath and exit' )
 cli.m( longOpt: 'max', argName: 'int', required: false,args: 1, 'maximum downloads to perform' )
-cli.b( longOpt: 'batch', argName: 'int', required: false, args: 1, 'download in specified batches' )
-cli.d( longOpt: 'delay', argName: 'milliseconds', required: false, args: 1, 'millisecond delay between batches' )
-cli.i( longOpt: 'remote-index', argName: 'url', required: false, args: 1, 'index download URL' )
-cli.I( longOpt: 'local-index', argName: 'path', required: false, args: 1, 'download remote index here' )
-cli.r( longOpt: 'remote-repository', argName: 'url', required: false, args: 1, 'artifact download URL' )
-cli.l( longOpt: 'local-repository', argName: 'path', required: false, args: 1, 'sync with this local repository' )
+cli.i( longOpt: 'index', argName: 'path', required: false, args: 1, 'download remote index here' )
+cli.r( longOpt: 'remote', argName: 'url', required: false, args: 1, 'remote artifact repository' )
+cli.l( longOpt: 'local', argName: 'path', required: false, args: 1, 'local artifact repository' )
 cli.s( longOpt: 'sync', required: false, 'perform sync' )
 cli.u( longOpt: 'update', required: false, 'incrementally update index before sync' )
 
 // If nothing has been supplied at all then exit with usage
-// even if -t or --test was specified
 if( args == null || args.length == 0 ) {
 	println "\n[error] No arguments supplied.\n"
 	cli.usage()
@@ -85,22 +78,14 @@ if( args == null || args.length == 0 ) {
 // If here then something has been supplied so parse the passed arguments
 def opt = cli.parse(args)
 
-// If help requested then just give usage and exit
+// If opt builder had error exit here
 if(!opt){
-	// If opt builder errored for any reason then exit here
 	System.exit(-1)
 }
 
 // If help requested then just give usage and exit
 if(opt.h){
 	cli.usage()
-	System.exit(0)
-}
-
-// Print classpath if specified
-if(opt.c){
-	println "\nRuntime Classpath:\n\n"
-	printClassPath this.class.classLoader
 	System.exit(0)
 }
 
@@ -111,7 +96,7 @@ if (opt.arguments()){
 	System.exit(-1)
 }
 
-// If opt.arguments contains anything here then unknown options were supplied so exit with usage
+// Must specify at least --sync or --update
 if (!(opt.s || opt.u)){
 	println "\n[error] Must specify at least one of: --sync --update\n"
 	cli.usage()
@@ -121,22 +106,6 @@ if (!(opt.s || opt.u)){
 //--------------------------------------------------------------------------
 // Validate user supplied options
 //--------------------------------------------------------------------------
-if(opt.i){
-	if(!validUrl(opt.i)){
-		println "\n[error] -i " + opt.i + " is not a valid URL\n"
-		cli.usage()
-		System.exit(-1)
-	}
-}
-
-if(opt.r){
-	if(!validUrl(opt.r)){
-		println "\n[error] -r " + opt.r + " is not a valid URL\n"
-		cli.usage()
-		System.exit(-1)
-	}
-}
-
 if(opt.m){
 	if(!opt.m.isNumber()){
 		println "\n[error] -m " + opt.m + " is not a valid number\n"
@@ -145,21 +114,6 @@ if(opt.m){
 	}
 }
 
-if(opt.d){
-	if(!opt.d.isNumber()){
-		println "\n[error] -d " + opt.d + " is not a valid number\n"
-		cli.usage()
-		System.exit(-1)
-	}
-}
-
-if(opt.b){
-	if(!opt.b.isNumber()){
-		println "\n[error] -b " + opt.b + " is not a valid number\n"
-		cli.usage()
-		System.exit(-1)
-	}
-}
 //--------------------------------------------------------------------------
 // Initialise variables - don't modify these
 //--------------------------------------------------------------------------
@@ -173,36 +127,59 @@ indexer = plexusContainer.lookup( Indexer.class )
 indexUpdater = plexusContainer.lookup( IndexUpdater.class )
 httpWagon = plexusContainer.lookup( Wagon.class, "http" )
 
-// Check if user overrode defaults
-remoteIndex = (opt.i) ? opt.i.toString() : remoteIndex
-remoteRepository = (opt.r) ? opt.r.toString() : remoteRepository
-localIndex = (opt.I) ? opt.I.toString() : localIndex
-localRepository = (opt.l) ? opt.l.toString() : localRepository
-maxDownload = (opt.m) ? opt.m.toInteger() : maxDownload
-delay = (opt.d) ? opt.d.toInteger() : delay
-batch = (opt.b) ? opt.b.toInteger() : batch
-
-// Set default maven command ( assume linux )
-cmdExec = "mvn"
-
-//--------------------------------------------------------------------------
-// Start synchronising
-//--------------------------------------------------------------------------
-println "Starting synchronisation"
-println "=============================================================="
-	
-// Set the cmd executable based on platform
-if (System.properties['os.name'].toLowerCase().contains('windows')) {
-	println "[Platform] windows"
-	println "[cmd] cmd /c mvn"
-	cmdExec = "cmd"
-} else {
-	println "[Platform] linux"
+// Make sure --max-downloads is a real number if any
+if(opt.m){
+	if(!opt.m.isNumber()){
+		println "\n[error] -m " + opt.m + " is not a valid number\n"
+		cli.usage()
+		System.exit(-1)
+	}
 }
-  
+
+remoteRepositoryUrl = (opt.r) ? opt.r.toString() : remoteRepositoryUrl
+localRepositoryPath = (opt.l) ? opt.l.toString() : localRepositoryPath
+localIndexPath = (opt.i) ? opt.i.toString() : localIndexPath
+maxDownload = (opt.m) ? opt.m.toInteger() : maxDownload
+
+//--------------------------------------------------------------------------
+// Display runtime settings
+//--------------------------------------------------------------------------
+println "Starting"
+println "=============================================================="
+println "Remote Repository: $remoteRepositoryUrl"
+println "Local Repository: $localRepositoryPath"
+println "Local Index: $localIndexPath"
+println "Download threshold: $maxDownload"
+println "=============================================================="
+
+//--------------------------------------------------------------------------
+// Path validation
+//--------------------------------------------------------------------------
+try{
+	new URL( remoteRepositoryUrl )
+}catch ( MalformedURLException e ){
+	println "[error] malformed remote repository url"
+	System.exit(-1)
+}
+
+localRepository = new File(localRepositoryPath)
+if(opt.s && !localRepository.exists()){
+	println "[error] Local repository doesnt exist"
+	System.exit(-1)
+}
+
+localIndex = new File(localIndexPath)
+if(!localIndex.exists()){
+	println "[error] Local index directory doesnt exist"
+	System.exit(-1)
+}
+
+//--------------------------------------------------------------------------
+// Configure maven indexer
+//--------------------------------------------------------------------------
 // Files where local cache is (if any) and Lucene Index should be located
-File mavenLocalCache = new File( "$localIndex/maven-cache" )
-File mavenIndexDir = new File( "$localIndex/maven-index" )
+File mavenLocalCache = new File( localIndex.getPath(), "maven-cache" )
+File mavenIndexDir = new File( localIndex.getPath(), "maven-index" )
 
  // Creators we want to use (search for fields it defines)
 List<IndexCreator> indexers = new ArrayList<IndexCreator>()
@@ -210,10 +187,10 @@ indexers.add( plexusContainer.lookup( IndexCreator.class, "min" ) )
 indexers.add( plexusContainer.lookup( IndexCreator.class, "jarContent" ) )
 indexers.add( plexusContainer.lookup( IndexCreator.class, "maven-plugin" ) )
   
-// Create context for central repository index
+// Create context for repository index
 mavenContext = indexer.createIndexingContext( 
 	"maven-context", "maven",
-	mavenLocalCache, mavenIndexDir,"$remoteIndex",
+	mavenLocalCache, mavenIndexDir,remoteRepositoryUrl,
 	null, true, true, indexers
 )
 
@@ -222,16 +199,15 @@ mavenContext = indexer.createIndexingContext(
 // note: incremental update will happen if this is not 1st run and files are not deleted
 //--------------------------------------------------------------------------
 if (opt.u){
-	if(!opt.i){
-		println("[warn] remote index not specified - skipping update")
+	if(!opt.r){
+		println("[warn] remote repository not specified - skipping update")
 		return
 	}
 	
 	// If here then proceed with index update
-	println( "Updating $localIndex from $remoteIndex")
-	println( "This might take a while on first run, so please be patient!" );
-	println( "==============================================================" )
- 
+	println( "[update] Updating " + localIndex.getPath() + " from $remoteRepositoryUrl")
+	println( "[update] This might take a while on first run, so please be patient!" );
+	 
 	// Create ResourceFetcher implementation to be used with IndexUpdateRequest
 	TransferListener listener = new AbstractTransferListener(){
 		public void transferStarted( TransferEvent transferEvent ){
@@ -252,146 +228,75 @@ if (opt.u){
 	try{
 		updateResult = indexUpdater.fetchAndUpdateIndex( updateRequest );
 	}catch(e){
-		println "\n[error] could not fetch index. Check URL\n"
+		println "[error] could not fetch remote index: " + e.message
 		System.exit(-1)
 	}
 	if ( updateResult.isFullUpdate() )
 	{
-		println( "Full update happened!" );
+		println( "[update] Full update happened!" );
 	}
 	else if ( updateResult.getTimestamp().equals( mavenContextCurrentTimestamp ) )
 	{
-		println( "No update needed, index is up to date!" );
+		println( "[update] No update needed, index is up to date!" );
 	}
 	else
 	{
-		println( "Incremental update happened, change covered " + mavenContextCurrentTimestamp
+		println( "[update] Incremental update happened, change covered " + mavenContextCurrentTimestamp
 			+ " - " + updateResult.getTimestamp() + " period." );
 	}
 
 }
 
 //--------------------------------------------------------------------------
-// Now scan the entire downloaded index and download artifacts that are not found locally
-// or until max-downloads reached. Apply a delay every blocksize if required
+// Scan the index and download artifacts that are not found locally
+// or until max-downloads reached.
 //--------------------------------------------------------------------------
 if (opt.s){
-	println()
-	println( "Searching $localIndex for new artifacts" )
-	println( "==============================================================" )
-	
+	// Acquire index searcher
 	IndexSearcher searcher = mavenContext.acquireIndexSearcher()
-	ant = new AntBuilder()	 // Call maven from built in antRunner
 	downloaded = 0           // max download counter
-	batchCurrent = 0         // batch counter
 	
 	try{
-		def IndexReader ir = searcher.getIndexReader();
+		IndexReader ir = searcher.getIndexReader();
 		maxDownload = (maxDownload > -1 && ir.maxDoc() > maxDownload) ? maxDownload : ir.maxDoc()
-		println()
-		println "Found " + ir.maxDoc() + " artifacts in the index"
-		println "Downloading a maximum of " + maxDownload.toString()
-		println( "==============================================================" )
+		println "[sync] Found total of " + ir.maxDoc() + " artifacts in the index"
 		
 		// Loop through every artifact in index
 		for ( int i = 0; i < ir.maxDoc(); i++ ){
+			// Don't bother with deleted artifacts
 			if ( !ir.isDeleted( i ) ){
-				// Get the index document to search for
+				// Get the indexed document to search for
 				Document doc = ir.document( i );
 				
-				// Get its artifact information
+				// Pull out the artifact information
 				ArtifactInfo ai = IndexUtils.constructArtifactInfo( doc, mavenContext );
-							
+											
 				// Artifact info might be null, so check to be sure
 				if( ai != null ){
-					// Dont bother trying to download poms directly, just content
-					if( ai.fextension != "pom" ){
-						// If classifier load the string ready
-						classifier = (ai.classifier != null) ? "-" + ai.classifier : ""
-						
-						// Get the artifact location on disk
-						localFileCheck = new File("$localRepository/"
-							+ ai.groupId.replace(".","/") + "/" + ai.artifactId + "/" + ai.version
-							+ "/" + ai.artifactId + "-" + ai.version
-							+ classifier
-							+ "." + ai.fextension)
-						
-						// Get the related pom file
-						pomCheck = new File("$localRepository/"
-							+ ai.groupId.replace(".","/") + "/" + ai.artifactId + "/" + ai.version
-							+ "/" + ai.artifactId + "-" + ai.version
-							+ classifier
-							+ ".pom")
-						
-						// Continue if the artifact doesn't exist yet
-						if( !localFileCheck.exists()){
-							
-							// See if there is associated pom and whether the artifact has been relocated
-							relocated = assertRelocated(pomCheck)
-							
-							if(relocated){
-								// Artifact has bee relocated. Skip it
-								printRelocationMsg(ai,pomCheck)
+					// Parse remote file path
+					String relPath = path(ai)
+					// Get local file
+					localFile = new File( localRepository, relPath )
+										
+					// Try direct download if the artifact doesn't already exist
+					if( !localFile.exists()){
+						print "[download] " + path(ai)
+						try{
+							FileUtils.copyURLToFile(new URL(remoteRepositoryUrl), localFile)
+							println " - done"
+						}catch ( e ){
+							if ( !localFile.exists() ){
+								println " - not found"
 							}else{
-								// Artifact doesn't exist and not relocated. Try downloading it
-								//print "Downloading: [" + localFileCheck.getPath() +"] "
-								print "Downloading: [" +ai.groupId + ":" + ai.artifactId + ":" + ai.version + classifier + "]"
-			
-								// fetch individual artifact version via standard nexus setup
-								ant.exec( executable:cmdExec){
-									// Platform dependent
-									if(cmdExec.contains('cmd')){
-										arg(value: "/c")
-										arg(value:"mvn")
-									}							
-									
-									arg(value:"--quiet")
-									//arg(value:"--batch-mode")
-									arg(value:"org.apache.maven.plugins:maven-dependency-plugin:2.7:get")
-									arg(value:"-DremoteRepositories=" + remoteRepository)
-									
-									artifact = ai.groupId+":"+ai.artifactId+":"+ai.version
-									
-									if(ai.packaging != null){
-										artifact = artifact + ":" + ai.packaging
-									}
-									
-									if(ai.classifier != null){
-										artifact = artifact + ":" + ai.classifier
-									}
-									
-									arg(value:"-Dartifact="+artifact)
-								}
-								
-								// Test for the file again. should be here now. If not
-								// the pom may have been downloaded and so check relocation again
-								if( localFileCheck.exists() ){
-									println " - success"
-								}else{
-									relocated = assertRelocated(pomCheck)
-									if(relocated != false){
-										println " - relocated"
-										printRelocationMsg(ai,pomCheck)
-									}else{
-										println " - failed"
-									}
-								}
-								
-								// Return if we have reached our chosen max
-								if( maxDownload != 0 && ++downloaded >= maxDownload ){
-									println "MaxDownload limit reached"
-									return
-								}
-								
-								// If we've hit a batch limit then sleep for chosen amount
-								if(  ++batchCurrent > 0 && batchCurrent == batch ){
-									if( delay > 0 ){
-										println "sleeping for $delay milliseconds"
-										sleep delay
-									}
-									batchCurrent = 0
-								}
+								println " - error transfering"
 							}
+							println e.message
+						}
+						
+						// If reached maxdoc then end here
+						if( ++downloaded >= maxDownload){
+							println "[download] max downloads reached"
+							return
 						}
 					}
 				}
@@ -405,56 +310,16 @@ if (opt.s){
 	}
 }
 
-// Print out current classpath for debug purposes
-def printClassPath(classLoader) {
-	println "$classLoader"
-	classLoader.getURLs().each {url->
-	   println "- ${url.toString()}"
+// Build relative path from remote artifact
+def path( ArtifactInfo ai ){
+	StringBuilder path = new StringBuilder( 128 );
+	path.append( ai.groupId.replace( '.', '/' ) ).append( '/' );
+	path.append( ai.artifactId ).append( '/' );
+	path.append( ai.version ).append( '/' );
+	path.append( ai.artifactId ).append( '-' ).append( ai.version );
+	if ( ai.classifier != null && ai.classifier.length() > 0 ){
+		path.append( '-' ).append( ai.classifier );
 	}
-	if (classLoader.parent) {
-	   printClassPath(classLoader.parent)
-	}
-}
-
-// Test for a valid url string
-def validUrl(url){
-	try {
-		new URL(url.toString())
-		return true
-	} catch (MalformedURLException e) {
-		return false
-	}
-}
-
-// Check a pomfile for relocation
-def assertRelocated(pom){
-	relocated = false
-	try{
-		xml = new XmlSlurper().parseText(pom.getText())
-		xml.depthFirst().any {
-			if(it.name()=="relocation"){
-				relocated = true
-			}
-		}
-	}catch(e){}
-	return relocated
-}
-
-// Return relocation destination
-def relocatedTo(pom){
-	destination = ""
-	try{
-		xml = new XmlSlurper().parseText(pom.getText())
-		xml.depthFirst().any {
-			if(it.name()=="relocation"){
-				destination = it.children()[0]
-			}
-		}
-	}catch(e){}
-	return destination
-}
-
-// print relocated to  msg
-def printRelocationMsg(ai, pom){
-	println "Relocated: [" +ai.groupId + ":" + ai.artifactId + ":" + ai.version + "] to " + "[" + relocatedTo(pom) + "] - skipping"
+	path.append( '.' ).append( ai.fextension );
+	return path.toString();
 }
