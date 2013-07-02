@@ -31,6 +31,8 @@ import org.apache.maven.index.updater.IndexUpdateResult;
 import org.apache.maven.index.updater.IndexUpdater;
 import org.apache.maven.index.updater.ResourceFetcher;
 import org.apache.maven.index.updater.WagonHelper;
+import org.apache.maven.index.packer.IndexPacker;
+import org.apache.maven.index.packer.IndexPackingRequest;
 import org.apache.maven.wagon.Wagon;
 import org.apache.maven.wagon.events.TransferEvent;
 import org.apache.maven.wagon.events.TransferListener;
@@ -44,15 +46,10 @@ import org.sonatype.aether.util.version.GenericVersionScheme;
 import org.sonatype.aether.version.InvalidVersionSpecificationException;
 import org.sonatype.aether.version.Version;
 import org.codehaus.plexus.util.FileUtils;
+import org.apache.log4j.*;
 //--------------------------------------------------------------------------
-
-//--------------------------------------------------------------------------
-// Default Settings
-//--------------------------------------------------------------------------
-remoteRepositoryUrl = "http://repo.maven.apache.org/maven2"
-localIndexPath = "./index"	 			// Store local index in current directory
-localRepositoryPath = "./repository"	// Check here when synchronising
-maxDownload = -1     // -1 will download all required dependencies
+// Switch off Log4j warnings
+LogManager.rootLogger.setLevel(Level.OFF);
 
 //--------------------------------------------------------------------------
 // Define and parse the program arguments
@@ -61,12 +58,13 @@ maxDownload = -1     // -1 will download all required dependencies
 def cli = new CliBuilder(usage:'mvnsync [options]', header:'options:')
 
 cli.h( longOpt: 'help', required: false, 'show usage information' )
-cli.m( longOpt: 'max', argName: 'int', required: false,args: 1, 'maximum downloads to perform' )
-cli.i( longOpt: 'index', argName: 'path', required: false, args: 1, 'download remote index here' )
+cli.m( longOpt: 'max', argName: 'int', required: false,args: 1, 'maximum artifacts to fetch' )
 cli.r( longOpt: 'remote', argName: 'url', required: false, args: 1, 'remote artifact repository' )
-cli.l( longOpt: 'local', argName: 'path', required: false, args: 1, 'local artifact repository' )
-cli.s( longOpt: 'sync', required: false, 'perform sync' )
-cli.u( longOpt: 'update', required: false, 'incrementally update index before sync' )
+cli.ri( longOpt: 'remote-index', argName: 'url', required: false, args: 1, 'remote index repository' )
+cli.l( longOpt: 'local', argName: 'path', required: false, args: 1, 'local artifact repository [required]' )
+cli.s( longOpt: 'sync', required: false, 'synchronise repositories' )
+cli.u( longOpt: 'update', required: false, 'update local cache from remote index' )
+cli.f( longOpt: 'filter', argName: "path", required: false, args: 1, 'skip artifacts already in this repository' )
 
 // If nothing has been supplied at all then exit with usage
 if( args == null || args.length == 0 ) {
@@ -96,9 +94,23 @@ if (opt.arguments()){
 	System.exit(-1)
 }
 
+// All other commands require local repo so check it
+if (!opt.l){
+	println "\n[error] Must specify local repo \n"
+	cli.usage()
+	System.exit(-1)
+}
+
 // Must specify at least --sync or --update
-if (!(opt.s || opt.u)){
-	println "\n[error] Must specify at least one of: --sync --update\n"
+if (!(opt.s || opt.u )){
+	println "\n[error] Must specify at least one of: --sync --update \n"
+	cli.usage()
+	System.exit(-1)
+}
+
+// if --update then need at least remote repo or remote index
+if (opt.u && (!opt.r && !opt.ri)){
+	println "\n[error] missing index repository, cannot update\n"
 	cli.usage()
 	System.exit(-1)
 }
@@ -117,15 +129,10 @@ if(opt.m){
 //--------------------------------------------------------------------------
 // Initialise variables - don't modify these
 //--------------------------------------------------------------------------
-PlexusContainer plexusContainer
-Indexer indexer
-IndexUpdater indexUpdater
-Wagon httpWagon
-IndexingContext mavenContext
 plexusContainer = new DefaultPlexusContainer()
-indexer = plexusContainer.lookup( Indexer.class )
-indexUpdater = plexusContainer.lookup( IndexUpdater.class )
-httpWagon = plexusContainer.lookup( Wagon.class, "http" )
+Indexer indexer = plexusContainer.lookup( Indexer.class )
+IndexUpdater indexUpdater = plexusContainer.lookup( IndexUpdater.class )
+Wagon httpWagon = plexusContainer.lookup( Wagon.class, "http" )
 
 // Make sure --max-downloads is a real number if any
 if(opt.m){
@@ -136,61 +143,74 @@ if(opt.m){
 	}
 }
 
-remoteRepositoryUrl = (opt.r) ? opt.r.toString() : remoteRepositoryUrl
-localRepositoryPath = (opt.l) ? opt.l.toString() : localRepositoryPath
-localIndexPath = (opt.i) ? opt.i.toString() : localIndexPath
-maxDownload = (opt.m) ? opt.m.toInteger() : maxDownload
-
+// Get remote index from either repo or user specified url
+remoteIndexUrl = (opt.ri) ? opt.ri : opt.r
 //--------------------------------------------------------------------------
 // Display runtime settings
 //--------------------------------------------------------------------------
 println "Starting"
 println "=============================================================="
-println "Remote Repository: $remoteRepositoryUrl"
-println "Local Repository: $localRepositoryPath"
-println "Local Index: $localIndexPath"
-println "Download threshold: $maxDownload"
+println "Local repository: ${opt.l}"
+if(opt.f){
+	println "Filter repository: ${opt.f}"
+}
+println "Local index: ${opt.l}/.index"
+if(opt.r){
+	println "Remote repository: ${opt.r}"
+}
+println "Remote index: $remoteIndexUrl"
+println "Remote index cache: ${opt.l}/.index/remote-cache"
+if(opt.m){
+	println "Download threshold: ${opt.m}"
+}
 println "=============================================================="
 
 //--------------------------------------------------------------------------
-// Path validation
+// URL and Path validation
 //--------------------------------------------------------------------------
-try{
-	new URL( remoteRepositoryUrl )
-}catch ( MalformedURLException e ){
-	println "[error] malformed remote repository url"
-	System.exit(-1)
+if(opt.r){
+	try{
+		new URL( opt.r )
+	}catch ( MalformedURLException e ){
+		println "[error] malformed remote repository url"
+		System.exit(-1)
+	}
 }
 
-localRepository = new File(localRepositoryPath)
+if(opt.ri){
+	try{
+		new URL( opt.ri )
+	}catch ( MalformedURLException e ){
+		println "[error] malformed remote index url"
+		System.exit(-1)
+	}
+}
+
+localRepository = new File(opt.l)
 if(opt.s && !localRepository.exists()){
-	println "[error] Local repository doesnt exist"
+	println "[error] local repository doesnt exist"
 	System.exit(-1)
 }
 
-localIndex = new File(localIndexPath)
-if(!localIndex.exists()){
-	println "[error] Local index directory doesnt exist"
-	System.exit(-1)
-}
-
+remoteIndexCache = new File(localRepository, ".index/remote-cache")
 //--------------------------------------------------------------------------
 // Configure maven indexer
 //--------------------------------------------------------------------------
-// Files where local cache is (if any) and Lucene Index should be located
-File mavenLocalCache = new File( localIndex.getPath(), "maven-cache" )
-File mavenIndexDir = new File( localIndex.getPath(), "maven-index" )
+// Files where remote lucene index cache should be located
+File mavenLocalCache = new File( remoteIndexCache, "maven-cache" )
+File mavenIndexDir = new File( remoteIndexCache, "maven-index" )
 
  // Creators we want to use (search for fields it defines)
 List<IndexCreator> indexers = new ArrayList<IndexCreator>()
 indexers.add( plexusContainer.lookup( IndexCreator.class, "min" ) )
 indexers.add( plexusContainer.lookup( IndexCreator.class, "jarContent" ) )
 indexers.add( plexusContainer.lookup( IndexCreator.class, "maven-plugin" ) )
+indexers.add( plexusContainer.lookup( IndexCreator.class, "maven-archetype" ) )
   
 // Create context for repository index
-mavenContext = indexer.createIndexingContext( 
+IndexingContext mavenContext = indexer.createIndexingContext( 
 	"maven-context", "maven",
-	mavenLocalCache, mavenIndexDir,remoteRepositoryUrl,
+	mavenLocalCache, mavenIndexDir,remoteIndexUrl,
 	null, true, true, indexers
 )
 
@@ -199,19 +219,14 @@ mavenContext = indexer.createIndexingContext(
 // note: incremental update will happen if this is not 1st run and files are not deleted
 //--------------------------------------------------------------------------
 if (opt.u){
-	if(!opt.r){
-		println("[warn] remote repository not specified - skipping update")
-		return
-	}
-	
 	// If here then proceed with index update
-	println( "[update] Updating " + localIndex.getPath() + " from $remoteRepositoryUrl")
+	println( "[update] Updating ${remoteIndexCache} from $remoteIndexUrl")
 	println( "[update] This might take a while on first run, so please be patient!" );
 	 
 	// Create ResourceFetcher implementation to be used with IndexUpdateRequest
 	TransferListener listener = new AbstractTransferListener(){
 		public void transferStarted( TransferEvent transferEvent ){
-		   print( "  Downloading " + transferEvent.getResource().getName() );
+		   print( "[update] downloading " + transferEvent.getResource().getName() );
 		}
 
 		public void transferProgress( TransferEvent transferEvent, byte[] buffer, int length ){}
@@ -221,9 +236,10 @@ if (opt.u){
 		}
 	};
 	ResourceFetcher resourceFetcher = new WagonHelper.WagonFetcher( httpWagon, listener, null, null );
-
+	
 	Date mavenContextCurrentTimestamp = mavenContext.getTimestamp();
 	IndexUpdateRequest updateRequest = new IndexUpdateRequest( mavenContext, resourceFetcher );
+	
 	IndexUpdateResult updateResult
 	try{
 		updateResult = indexUpdater.fetchAndUpdateIndex( updateRequest );
@@ -244,7 +260,6 @@ if (opt.u){
 		println( "[update] Incremental update happened, change covered " + mavenContextCurrentTimestamp
 			+ " - " + updateResult.getTimestamp() + " period." );
 	}
-
 }
 
 //--------------------------------------------------------------------------
@@ -256,10 +271,21 @@ if (opt.s){
 	IndexSearcher searcher = mavenContext.acquireIndexSearcher()
 	downloaded = 0           // max download counter
 	
+	// See if we have archetype-catalog.xml yet and download it
+	archetypeCatalog = new File(localRepository, "archetype-catalog.xml")
+	if(!archetypeCatalog.exists()){
+		print "[archetype] fetching archetype catalog"
+		try{
+			FileUtils.copyURLToFile(new URL(opt.r + "/archetype-catalog.xml"), archetypeCatalog)
+			println " - done"
+		}catch ( e ){
+			println " - error: " + e.message
+		}
+	}
+	
 	try{
 		IndexReader ir = searcher.getIndexReader();
-		maxDownload = (maxDownload > -1 && ir.maxDoc() > maxDownload) ? maxDownload : ir.maxDoc()
-		println "[sync] Found total of " + ir.maxDoc() + " artifacts in the index"
+		println "[sync] there are " + ir.maxDoc() + " artifacts in the index"
 		
 		// Loop through every artifact in index
 		for ( int i = 0; i < ir.maxDoc(); i++ ){
@@ -270,33 +296,39 @@ if (opt.s){
 				
 				// Pull out the artifact information
 				ArtifactInfo ai = IndexUtils.constructArtifactInfo( doc, mavenContext );
-											
+							
 				// Artifact info might be null, so check to be sure
 				if( ai != null ){
 					// Parse remote file path
 					String relPath = path(ai)
 					// Get local file
 					localFile = new File( localRepository, relPath )
-										
+															
 					// Try direct download if the artifact doesn't already exist
-					if( !localFile.exists()){
+					if( !localFile.exists() ){
+						// Skip files in filter location if specified
+						if(opt.f){
+							filterRepository = new File(opt.f)
+							altFile = new File(filterRepository, relPath)
+							if(altFile.exists()){
+								println "[filtered] skipping: " + path(ai)
+								return
+							}
+						}
 						print "[download] " + path(ai)
 						try{
-							FileUtils.copyURLToFile(new URL(remoteRepositoryUrl), localFile)
+							FileUtils.copyURLToFile(new URL(opt.r), localFile)
 							println " - done"
 						}catch ( e ){
-							if ( !localFile.exists() ){
-								println " - not found"
-							}else{
-								println " - error transfering"
-							}
-							println e.message
+							println " - error: " + e.message
 						}
 						
 						// If reached maxdoc then end here
-						if( ++downloaded >= maxDownload){
-							println "[download] max downloads reached"
-							return
+						if( opt.m ){
+							if(++downloaded >= opt.m.toInteger()){
+								println "[download] max downloads reached"
+								return
+							}
 						}
 					}
 				}

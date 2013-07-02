@@ -18,7 +18,6 @@ dependencies {
     groovy 'org.codehaus.groovy:groovy-all:2.1.5'
 	groovy 'org.apache.ivy:ivy:2.3.0'
 
-	compile 'org.apache.ant:ant-nodeps:1.8.1'
 	compile 'asm:asm:3.3.1'
 	compile 'cglib:cglib:2.2.2'
 	compile 'com.google.collections:google-collections:1.0'
@@ -65,6 +64,7 @@ dependencies {
 	compile 'org.sonatype.sisu:sisu-guice:3.0.3-no_aop'
 	compile 'org.sonatype.sisu:sisu-inject-bean:2.2.3'
 	compile 'org.sonatype.sisu:sisu-inject-plexus:2.2.3'
+	compile 'org.sonatype.nexus:nexus-indexer:3.0.4'
 }
 
 task uberjar(type: Jar, dependsOn:[':compileGroovy']) {
