@@ -1,0 +1,45 @@
+apply plugin: 'groovy'
+apply plugin: 'eclipse'
+
+compileGroovy {
+	sourceCompatibility = 1.6
+	targetCompatibility = 1.6
+}
+
+project.ext.mainClassName="hubsync"
+
+repositories {
+    // Where to get the dependencies from
+    mavenCentral()
+}
+
+dependencies {
+    // All dependencies are groovy compile / runtime dependencies
+    groovy 'org.codehaus.groovy:groovy-all:2.1.5'
+	groovy 'org.apache.ivy:ivy:2.3.0'
+
+	compile 'commons-cli:commons-cli:1.0'
+	compile 'org.codehaus.groovy.modules.http-builder:http-builder:0.5.2'
+}
+
+task uberjar(type: Jar, dependsOn:[':compileGroovy']) {
+	// Add the compiled groovy source
+	from sourceSets.main.output.classesDir
+	
+	// Add eclipse jar in jar loader
+	from zipTree("dist/jar-in-jar-loader.zip")
+	
+	// Get the Groovy dependencies
+	from configurations.runtime
+
+	// Specifiy which class to run ( name of groovy script or class with main in it)
+	manifest {
+		attributes 'Main-Class': "org.eclipse.jdt.internal.jarinjarloader.JarRsrcLoader"
+		attributes 'Rsrc-Main-Class': "hubsync"
+		attributes 'Class-Path': "."
+		attributes 'Rsrc-Class-Path': "./ " + configurations.runtime.collect { it.getName() }.join(' ')
+	}
+	
+	baseName = 'hubsync'
+	destinationDir = file("dist")
+}
